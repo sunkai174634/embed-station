@@ -18,6 +18,7 @@ class Settings:
     batch_size: int = int(os.getenv("BATCH_SIZE", "1"))
     batch_window_ms: int = int(os.getenv("BATCH_WINDOW_MS", "0"))
     max_input_tokens: int = int(os.getenv("MAX_INPUT_TOKENS", "3584"))
+    rerank_max_tokens: int = int(os.getenv("RERANK_MAX_TOKENS", "24000"))
     max_batch_items: int = int(os.getenv("MAX_BATCH_ITEMS", "100"))
     max_queue_items: int = int(os.getenv("MAX_QUEUE_ITEMS", "512"))
     telemetry_retention_days: int = int(os.getenv("TELEMETRY_RETENTION_DAYS", "0"))
@@ -28,6 +29,8 @@ class Settings:
             raise ValueError("jobs/batch_size must be positive and batch_window_ms non-negative")
         if self.max_input_tokens < 1:
             raise ValueError("MAX_INPUT_TOKENS must be positive")
+        if self.rerank_max_tokens < 1:
+            raise ValueError("RERANK_MAX_TOKENS must be positive")
         if self.max_batch_items < 1:
             raise ValueError("MAX_BATCH_ITEMS must be positive")
         if self.max_queue_items < 1:

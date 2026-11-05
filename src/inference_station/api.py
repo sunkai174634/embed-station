@@ -324,11 +324,11 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
         if body.model and body.model != reranker.model_id:
             raise HTTPException(400, "requested model does not match configured reranker")
         token_total = await asyncio.to_thread(reranker.count_tokens, body.query, body.texts)
-        if token_total > settings.max_input_tokens:
+        if token_total > settings.rerank_max_tokens:
             raise HTTPException(
                 413,
-                f"input of {token_total} tokens exceeds the limit of {settings.max_input_tokens};"
-                " split the input into smaller batches",
+                f"input of {token_total} tokens exceeds the rerank limit"
+                f" of {settings.rerank_max_tokens}; split the input into smaller batches",
             )
         started = time.perf_counter()
         timestamp = datetime.now(timezone.utc).isoformat()

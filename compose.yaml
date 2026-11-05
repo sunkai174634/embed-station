@@ -16,6 +16,7 @@ services:
       BATCH_SIZE: "4"
       BATCH_WINDOW_MS: "20"
       MAX_INPUT_TOKENS: "3584"
+      RERANK_MAX_TOKENS: "24000"
       MAX_BATCH_ITEMS: "100"
       MAX_QUEUE_ITEMS: "512"
       INFER_TIMEOUT_S: "30"
