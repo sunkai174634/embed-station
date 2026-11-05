@@ -23,6 +23,11 @@ class BatchProcessor:
         self.active: list[_Item] = []
         self.closed = False
 
+    @property
+    def backlog(self) -> int:
+        """Queued + in-flight items. Used as an overload guard by callers."""
+        return self.queue.qsize() + len(self.active)
+
     def start(self) -> None:
         if self.tasks:
             raise RuntimeError("batch processor already started")

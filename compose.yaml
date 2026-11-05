@@ -15,6 +15,7 @@ services:
       BATCH_WINDOW_MS: "20"
       MAX_INPUT_TOKENS: "3584"
       MAX_BATCH_ITEMS: "100"
+      MAX_QUEUE_ITEMS: "512"
       INFER_TIMEOUT_S: "30"
       TELEMETRY_RETENTION_DAYS: "0"
       LD_LIBRARY_PATH: /hostlocal:/usr/lib/x86_64-linux-gnu/intel-opencl:/usr/lib/x86_64-linux-gnu:/opt/intel/openvino/runtime/3rdparty/tbb/lib:/opt/intel/openvino/runtime/lib/intel64:/opt/intel/openvino/tools/compile_tool

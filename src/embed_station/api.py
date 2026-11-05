@@ -145,7 +145,16 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
                 413,
                 f"{len(texts)} inputs exceed the per-request limit of {settings.max_batch_items}",
             )
-        token_total = state["engine"].count_tokens(texts)
+        processor: BatchProcessor = state["batch"]
+        if processor is not None and processor.backlog + len(texts) > settings.max_queue_items:
+            # Overload guard: reject before enqueueing so ghost/timed-out work
+            # cannot pile up behind a wedged GPU and starve new requests.
+            raise HTTPException(
+                503,
+                f"service is busy ({processor.backlog} queued items); retry later",
+                headers={"Retry-After": "5"},
+            )
+        token_total = await asyncio.to_thread(state["engine"].count_tokens, texts)
         if token_total > settings.max_input_tokens:
             raise HTTPException(
                 413,
@@ -198,6 +207,38 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
             }
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError as exc:
+            duration = (time.perf_counter() - started) * 1000
+            detail = describe_exception(exc)
+            await asyncio.to_thread(
+                store.record_request,
+                {
+                    "request_id": request_id,
+                    "timestamp": timestamp,
+                    "input_count": len(texts),
+                    "token_count": 0,
+                    "duration_ms": duration,
+                    "status": "error",
+                    "error": detail,
+                },
+            )
+            await asyncio.to_thread(store.event, "ERROR", "embedding_timeout", request_id, detail)
+            logger.warning(
+                "embedding_timeout",
+                extra={
+                    "request_id": request_id,
+                    "detail": f"timeout after {settings.infer_timeout_s}s",
+                },
+            )
+            # 503 (not 500): clients back off and retry instead of hammering a
+            # busy GPU. The in-flight batch itself cannot be cancelled.
+            raise HTTPException(
+                503,
+                f"inference timed out after {settings.infer_timeout_s}s; retry later",
+                headers={"Retry-After": "5"},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(400, describe_exception(exc)) from exc
         except Exception as exc:
             duration = (time.perf_counter() - started) * 1000
             detail = describe_exception(exc)
