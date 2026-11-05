@@ -17,7 +17,7 @@ from .batch import BatchProcessor
 from .inference import Engine, OpenVINOEngine
 from .onnx_engine import OnnxOpenVINOEngine
 from .rerank_engine import OnnxRerankerEngine
-from .settings import settings
+from .settings import resolve_limits, settings
 from .telemetry import Telemetry, configure_logging
 
 
@@ -115,6 +115,9 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
             retention_days=settings.telemetry_retention_days,
         )
         state["telemetry"] = store
+        emb_limit, rr_limit = resolve_limits()
+        state["emb_limit"] = emb_limit
+        state["rr_limit"] = rr_limit
         active = engine
         if active is None:
             active = await asyncio.to_thread(build_engine)
@@ -208,10 +211,11 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
                 headers={"Retry-After": "5"},
             )
         token_total = await asyncio.to_thread(state["engine"].count_tokens, texts)
-        if token_total > settings.max_input_tokens:
+        if token_total > state.get("emb_limit", settings.max_input_tokens):
             raise HTTPException(
                 413,
-                f"input of {token_total} tokens exceeds the limit of {settings.max_input_tokens};"
+                f"input of {token_total} tokens exceeds the limit"
+                f" of {state.get('emb_limit', settings.max_input_tokens)};"
                 " split the input into smaller batches",
             )
         started = time.perf_counter()
@@ -324,11 +328,12 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
         if body.model and body.model != reranker.model_id:
             raise HTTPException(400, "requested model does not match configured reranker")
         token_total = await asyncio.to_thread(reranker.count_tokens, body.query, body.texts)
-        if token_total > settings.rerank_max_tokens:
+        if token_total > state.get("rr_limit", settings.rerank_max_tokens):
             raise HTTPException(
                 413,
                 f"input of {token_total} tokens exceeds the rerank limit"
-                f" of {settings.rerank_max_tokens}; split the input into smaller batches",
+                f" of {state.get('rr_limit', settings.rerank_max_tokens)};"
+                " split the input into smaller batches",
             )
         started = time.perf_counter()
         timestamp = datetime.now(timezone.utc).isoformat()
