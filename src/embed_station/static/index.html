@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Embed Station</title><link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand"><span class="brand-mark" aria-hidden="true"></span><h1>Embed Station</h1></div>
+  <span id="state" class="badge">Connecting</span>
+  <span id="updated" class="muted"></span>
+  <select id="lang" aria-label="Language"><option value="en">English</option><option value="zh">中文</option></select>
+  <button id="pause" aria-pressed="false">Pause</button>
+</header>
+<main>
+  <section class="stats" id="stats" aria-label="Service metrics"></section>
+  <section class="card">
+    <div class="card-header"><h2 data-i18n="requests">Requests</h2>
+      <form id="request-filter" class="filter"><input name="request_id" data-i18n-ph="filterRequestId" placeholder="Filter by Request ID" aria-label="Request ID"><button data-i18n="apply">Apply</button></form>
+    </div>
+    <div class="table-wrap">
+    <table><thead><tr><th data-i18n="time">Time</th><th data-i18n="requestId">Request ID</th><th data-i18n="inputs">Inputs</th><th data-i18n="tokens">Tokens</th><th data-i18n="duration">Duration</th><th data-i18n="status">Status</th><th data-i18n="error">Error</th></tr></thead><tbody id="requests"></tbody></table>
+    </div>
+    <nav id="request-pages" class="pager"></nav>
+  </section>
+  <section class="card">
+    <div class="card-header"><h2 data-i18n="events">Events</h2>
+      <form id="event-filter" class="filter"><input name="request_id" data-i18n-ph="filterRequestId" placeholder="Filter by Request ID" aria-label="Request ID"><select name="level" aria-label="Level"><option value="" data-i18n="allLevels">All levels</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select><button data-i18n="apply">Apply</button></form>
+    </div>
+    <div class="table-wrap">
+    <table><thead><tr><th data-i18n="time">Time</th><th data-i18n="level">Level</th><th data-i18n="event">Event</th><th data-i18n="requestId">Request ID</th><th data-i18n="detail">Detail</th></tr></thead><tbody id="events"></tbody></table>
+    </div>
+    <nav id="event-pages" class="pager"></nav>
+  </section>
+</main>
+<script src="/static/app.js" defer></script>
+</body></html>
