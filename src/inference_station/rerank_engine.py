@@ -43,6 +43,8 @@ class OnnxRerankerEngine:
         self.model_id = model_id
         self.model_dir = model_dir
         self.gpu_lock = gpu_lock  # shared with the embedding engine: one GPU, one queue
+        # Same fast-tokenizer concurrency constraint as the embedding engine.
+        self.tok_lock = threading.Lock()
         onnx_path = model_dir / "model.onnx"
         if not onnx_path.is_file():
             raise FileNotFoundError(f"ONNX reranker not found: {onnx_path.name}")
@@ -69,9 +71,9 @@ class OnnxRerankerEngine:
         """Return sigmoid scores, one per text, aligned with input order."""
         if not texts:
             raise ValueError("texts must not be empty")
-        enc = self.tokenizer(
-            [(query, text) for text in texts], padding=True, truncation=False, return_tensors="np"
-        )
+        with self.tok_lock:
+            pairs = [(query, text) for text in texts]
+            enc = self.tokenizer(pairs, padding=True, truncation=False, return_tensors="np")
         feed = {
             "input_ids": enc["input_ids"].astype(np.int64),
             "attention_mask": enc["attention_mask"].astype(np.int64),
@@ -90,7 +92,7 @@ class OnnxRerankerEngine:
 
     def count_tokens(self, query: str, texts: list[str]) -> int:
         """Total tokens for the (query, text) pairs, computed before GPU work."""
-        enc = self.tokenizer(
-            [(query, text) for text in texts], padding=False, truncation=False, return_tensors=None
-        )
+        with self.tok_lock:
+            pairs = [(query, text) for text in texts]
+            enc = self.tokenizer(pairs, padding=False, truncation=False, return_tensors=None)
         return sum(len(ids) for ids in enc["input_ids"])

@@ -59,6 +59,9 @@ class OpenVINOEngine:
         self.compiled = core.compile_model(model, "GPU")
         self.request = self.compiled.create_infer_request()
         self.infer_lock = threading.Lock()
+        # HF fast tokenizers share a Rust core that rejects concurrent entry
+        # ("Already borrowed"); every tokenizer call must hold this lock.
+        self.tok_lock = threading.Lock()
         outputs = self.embed(["readiness probe"])
         self.dimension = len(outputs.vectors[0])
         if self.dimension <= 0:
@@ -67,7 +70,8 @@ class OpenVINOEngine:
     def embed(self, texts: list[str]) -> EmbeddingResult:
         if not texts:
             raise ValueError("input must not be empty")
-        encoded = self.tokenizer(texts, padding=True, truncation=False, return_tensors="np")
+        with self.tok_lock:
+            encoded = self.tokenizer(texts, padding=True, truncation=False, return_tensors="np")
         ids = encoded["input_ids"].astype(np.int64)
         mask = encoded["attention_mask"].astype(np.int64)
         lengths = mask.sum(axis=1)
@@ -91,5 +95,6 @@ class OpenVINOEngine:
 
     def count_tokens(self, texts: list[str]) -> int:
         """Total input tokens for a request, computed before any GPU work."""
-        encoded = self.tokenizer(texts, padding=False, truncation=False, return_tensors=None)
+        with self.tok_lock:
+            encoded = self.tokenizer(texts, padding=False, truncation=False, return_tensors=None)
         return sum(len(ids) for ids in encoded["input_ids"])
