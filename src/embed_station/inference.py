@@ -31,7 +31,7 @@ class Engine(Protocol):
 
 
 class OpenVINOEngine:
-    def __init__(self, model_dir: Path, model_id: str) -> None:
+    def __init__(self, model_dir: Path, model_id: str, cache_dir: Path | None = None) -> None:
         import openvino as ov
         from transformers import AutoTokenizer
 
@@ -50,6 +50,10 @@ class OpenVINOEngine:
         if "GPU" not in core.available_devices:
             raise RuntimeError("OpenVINO GPU device is unavailable; CPU fallback is disabled")
         self.device_name = str(core.get_property("GPU", "FULL_DEVICE_NAME"))
+        if cache_dir is not None:
+            # Persist compiled GPU kernels so restarts skip the ~30s compile.
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            core.set_property({"CACHE_DIR": str(cache_dir)})
         model = core.read_model(str(xml))
         self.compiled = core.compile_model(model, "GPU")
         self.request = self.compiled.create_infer_request()

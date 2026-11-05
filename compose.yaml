@@ -22,6 +22,7 @@ services:
     volumes:
       - ${MODEL_DIR:?Set MODEL_DIR to the read-only model directory}:/models:ro
       - embed_station_data:/data
+      - embed_station_gpu_cache:/cache/gpu
       - /etc/OpenCL/vendors:/etc/OpenCL/vendors:ro
       - /usr/local/lib:/hostlocal:ro
       - /usr/lib/x86_64-linux-gnu/intel-opencl:/usr/lib/x86_64-linux-gnu/intel-opencl:ro
@@ -37,3 +38,4 @@ services:
     restart: unless-stopped
 volumes:
   embed_station_data:
+  embed_station_gpu_cache:

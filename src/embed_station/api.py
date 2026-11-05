@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -22,9 +23,10 @@ from .telemetry import Telemetry, configure_logging
 def build_engine() -> Engine:
     """Select the engine by MODEL_FORMAT: 'onnx' serves any ONNX encoder,
     'openvino' (default) serves an OpenVINO IR export directory."""
+    cache_dir = Path(os.getenv("OV_CACHE_DIR", "/cache/gpu")) if os.getenv("OV_CACHE_DIR") else None
     if settings.model_format == "onnx":
-        return OnnxOpenVINOEngine(settings.model_dir, settings.model_id)
-    return OpenVINOEngine(settings.model_dir, settings.model_id)
+        return OnnxOpenVINOEngine(settings.model_dir, settings.model_id, cache_dir)
+    return OpenVINOEngine(settings.model_dir, settings.model_id, cache_dir)
 
 
 class EmbeddingRequest(BaseModel):

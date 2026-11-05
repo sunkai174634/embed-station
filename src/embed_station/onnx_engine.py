@@ -21,7 +21,7 @@ from .inference import EmbeddingResult
 class OnnxOpenVINOEngine:
     """Serve an ONNX encoder through OpenVINO with sentence-transformers pooling."""
 
-    def __init__(self, model_dir: Path, model_id: str) -> None:
+    def __init__(self, model_dir: Path, model_id: str, cache_dir: Path | None = None) -> None:
         import openvino as ov
         from transformers import AutoTokenizer
 
@@ -53,6 +53,10 @@ class OnnxOpenVINOEngine:
         if "GPU" not in core.available_devices:
             raise RuntimeError("OpenVINO GPU device is unavailable; CPU fallback is disabled")
         self.device_name = str(core.get_property("GPU", "FULL_DEVICE_NAME"))
+        if cache_dir is not None:
+            # Persist compiled GPU kernels so restarts skip the recompile.
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            core.set_property({"CACHE_DIR": str(cache_dir)})
         model = core.read_model(str(onnx_path))
         self.compiled = core.compile_model(model, "GPU")
         self.request = self.compiled.create_infer_request()
