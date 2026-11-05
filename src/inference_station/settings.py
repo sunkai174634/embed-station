@@ -8,6 +8,8 @@ class Settings:
     model_dir: Path = Path(os.getenv("MODEL_DIR", "/models/qwen3-embedding-0.6b-int8-ov"))
     model_id: str = os.getenv("MODEL_ID", "qwen3-embedding-0.6b-int8-ov")
     model_format: str = os.getenv("MODEL_FORMAT", "openvino")
+    reranker_model_dir: str = os.getenv("RERANKER_MODEL_DIR", "")
+    reranker_model_id: str = os.getenv("RERANKER_MODEL_ID", "reranker")
     data_dir: Path = Path(os.getenv("DATA_DIR", "/data"))
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = int(os.getenv("PORT", "8080"))

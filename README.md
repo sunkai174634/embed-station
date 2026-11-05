@@ -1,10 +1,11 @@
-# Embed Station
+# Inference Station
 
-A self-hosted, OpenAI-compatible embedding service for NAS-class hardware
+A self-hosted embedding **and reranking** service for NAS-class hardware
 (Intel iGPU / small CPUs). Serves any encoder through **OpenVINO** — either an
-OpenVINO IR export or an ONNX export — with a built-in dashboard, SQLite
-request/event history, and hard input guards. Not tied to any single consumer:
-point anything that speaks the OpenAI embeddings API at it.
+OpenVINO IR export or an ONNX export — plus an optional ONNX cross-encoder at
+`/v1/rerank` (TEI-compatible), with a built-in dashboard, SQLite request/event
+history, and hard input guards. Not tied to any single consumer: point
+anything that speaks the OpenAI embeddings or TEI rerank APIs at it.
 
 **Privacy:** the service persists request metadata only (timestamps, counts,
 latency, status). Input text and embedding vectors are never stored.
@@ -12,14 +13,20 @@ latency, status). Input text and embedding vectors are never stored.
 ## Features
 
 - `POST /v1/embeddings`, `GET /v1/models` — OpenAI-compatible
+- `POST /v1/rerank` — TEI-compatible cross-encoder reranking (optional second
+  model in the same container; sigmoid scores, original indices preserved)
 - Two engine formats, one service:
   - `MODEL_FORMAT=openvino` — OpenVINO IR exports (e.g. Qwen3-Embedding INT8)
   - `MODEL_FORMAT=onnx` — any ONNX encoder with sentence-transformers pooling
     (e.g. `hs-embed-1`); export tool included (`tools/export_onnx.py`)
+- Single-container dual-model design: embedding and reranker share one
+  process-wide GPU lock (one queue, fair scheduling; measured: rerank b20 adds
+  only +22ms median under a sustained embedding flood)
 - GPU-only philosophy on iGPU hosts: the process exits instead of silently
   falling back to CPU (see `docs/RUNTIME.md` for the CPU-vs-GPU trade study)
 - Hard guards sized by measurement: input token cap (HTTP 413 before GPU),
-  max items per request, per-request inference timeout
+  max items per request, overload rejection (503 + Retry-After),
+  per-request inference timeout
 - Same-origin dashboard (`/`) with request history and service events
 - SQLite (WAL) telemetry with optional retention
 
@@ -61,6 +68,8 @@ All knobs are environment variables with measured defaults; see
 | `MODEL_DIR` | — | Model directory (IR `openvino_model.xml` or ONNX `model.onnx` + tokenizer) |
 | `MODEL_ID` | — | Served model name (echoed by `/v1/models`, checked against requests) |
 | `MODEL_FORMAT` | `openvino` | `openvino` (IR) or `onnx` (ONNX + sentence-transformers pooling) |
+| `RERANKER_MODEL_DIR` | *(empty)* | Optional ONNX cross-encoder directory; empty disables `/v1/rerank` |
+| `RERANKER_MODEL_ID` | `reranker` | Served reranker name (checked against requests) |
 | `INFER_JOBS` | `1` | CPU-side workers; GPU inference stays serialized |
 | `BATCH_SIZE` / `BATCH_WINDOW_MS` | `4` / `20` | Micro-batching; at sparse load behaves as batch=1, auto-coalesces under load |
 | `MAX_INPUT_TOKENS` | `3584` | Measured iGPU ceiling; oversize requests get 413 before GPU |

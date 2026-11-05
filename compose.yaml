@@ -1,5 +1,5 @@
 services:
-  embed-station:
+  inference-station:
     build:
       context: .
       platforms: [linux/amd64]
@@ -9,6 +9,8 @@ services:
       MODEL_DIR: /models
       MODEL_ID: ${MODEL_ID:-qwen3-embedding-0.6b-int8-ov}
       MODEL_FORMAT: ${MODEL_FORMAT:-openvino}
+      RERANKER_MODEL_DIR: ${RERANKER_MODEL_DIR:-}
+      RERANKER_MODEL_ID: ${RERANKER_MODEL_ID:-reranker}
       DATA_DIR: /data
       INFER_JOBS: "1"
       BATCH_SIZE: "4"
@@ -21,8 +23,8 @@ services:
       LD_LIBRARY_PATH: /hostlocal:/usr/lib/x86_64-linux-gnu/intel-opencl:/usr/lib/x86_64-linux-gnu:/opt/intel/openvino/runtime/3rdparty/tbb/lib:/opt/intel/openvino/runtime/lib/intel64:/opt/intel/openvino/tools/compile_tool
     volumes:
       - ${MODEL_DIR:?Set MODEL_DIR to the read-only model directory}:/models:ro
-      - embed_station_data:/data
-      - embed_station_gpu_cache:/cache/gpu
+      - inference_station_data:/data
+      - inference_station_gpu_cache:/cache/gpu
       - /etc/OpenCL/vendors:/etc/OpenCL/vendors:ro
       - /usr/local/lib:/hostlocal:ro
       - /usr/lib/x86_64-linux-gnu/intel-opencl:/usr/lib/x86_64-linux-gnu/intel-opencl:ro
@@ -37,5 +39,5 @@ services:
       - ${RENDER_GID:?Set RENDER_GID to the host render group ID}
     restart: unless-stopped
 volumes:
-  embed_station_data:
-  embed_station_gpu_cache:
+  inference_station_data:
+  inference_station_gpu_cache:

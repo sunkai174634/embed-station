@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from .batch import BatchProcessor
 from .inference import Engine, OpenVINOEngine
 from .onnx_engine import OnnxOpenVINOEngine
+from .rerank_engine import OnnxRerankerEngine
 from .settings import settings
 from .telemetry import Telemetry, configure_logging
 
@@ -27,6 +28,45 @@ def build_engine() -> Engine:
     if settings.model_format == "onnx":
         return OnnxOpenVINOEngine(settings.model_dir, settings.model_id, cache_dir)
     return OpenVINOEngine(settings.model_dir, settings.model_id, cache_dir)
+
+
+def build_reranker(gpu_lock) -> OnnxRerankerEngine | None:
+    """Optional second model: an ONNX cross-encoder sharing the process GPU lock.
+    Disabled unless RERANKER_MODEL_DIR points at a model.onnx directory."""
+    if not settings.reranker_model_dir:
+        return None
+    cache_dir = Path(os.getenv("OV_CACHE_DIR", "/cache/gpu")) if os.getenv("OV_CACHE_DIR") else None
+    return OnnxRerankerEngine(
+        Path(settings.reranker_model_dir), settings.reranker_model_id, gpu_lock, cache_dir
+    )
+
+
+class RerankRequest(BaseModel):
+    """TEI-compatible /rerank payload."""
+
+    model_config = ConfigDict(extra="ignore")
+    query: str
+    texts: list[str]
+    model: str | None = None
+    return_text: bool = False
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("query must be a non-empty string")
+        return value
+
+    @field_validator("texts")
+    @classmethod
+    def validate_texts(cls, value: list[str]) -> list[str]:
+        if not value or any(not isinstance(t, str) or not t.strip() for t in value):
+            raise ValueError("texts must be a non-empty list of non-empty strings")
+        if len(value) > settings.max_batch_items:
+            raise ValueError(
+                f"{len(value)} texts exceed the per-request limit of {settings.max_batch_items}"
+            )
+        return value
 
 
 class EmbeddingRequest(BaseModel):
@@ -90,10 +130,20 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
             workers=settings.jobs,
         )
         state["batch"].start()
+        reranker = await asyncio.to_thread(build_reranker, active.infer_lock)
+        state["reranker"] = reranker
+        if reranker is not None:
+            store.event(
+                "INFO",
+                "reranker_ready",
+                detail=f"model={reranker.model_id} device={reranker.device_name}",
+            )
         store.event("INFO", "service_ready", detail=f"device={active.device_name}")
         yield
         state["ready"] = False
         await state["batch"].close()
+        if state.get("reranker") is not None:
+            await asyncio.to_thread(state["reranker"].close)
         await asyncio.to_thread(active.close)
 
     app = FastAPI(title="Embed Station", version="0.1.0", lifespan=lifespan)
@@ -113,6 +163,7 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
             "model": active.model_id if active else settings.model_id,
             "device": state["device"],
             "dimension": state["dimension"],
+            "reranker": state["reranker"].model_id if state.get("reranker") is not None else None,
         }
 
     @app.get("/ready")
@@ -259,6 +310,82 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
             await asyncio.to_thread(store.event, "ERROR", "embedding_failed", request_id, detail)
             logger.exception("embedding_failed", extra={"request_id": request_id, "detail": detail})
             raise HTTPException(500, "embedding inference failed") from exc
+
+    @app.post("/v1/rerank")
+    async def rerank(body: RerankRequest, request: Request, response: Response):
+        """TEI-compatible reranking: score (query, text) pairs, return sorted results."""
+        reranker = state.get("reranker")
+        request_id = request.headers.get("x-request-id") or str(uuid4())
+        response.headers["x-request-id"] = request_id
+        if not state["ready"]:
+            raise HTTPException(503, "model is not ready")
+        if reranker is None:
+            raise HTTPException(404, "no reranker configured; set RERANKER_MODEL_DIR")
+        if body.model and body.model != reranker.model_id:
+            raise HTTPException(400, "requested model does not match configured reranker")
+        token_total = await asyncio.to_thread(reranker.count_tokens, body.query, body.texts)
+        if token_total > settings.max_input_tokens:
+            raise HTTPException(
+                413,
+                f"input of {token_total} tokens exceeds the limit of {settings.max_input_tokens};"
+                " split the input into smaller batches",
+            )
+        started = time.perf_counter()
+        timestamp = datetime.now(timezone.utc).isoformat()
+        store: Telemetry = state["telemetry"]
+        try:
+            scores = await asyncio.wait_for(
+                asyncio.to_thread(reranker.rerank, body.query, body.texts),
+                timeout=settings.infer_timeout_s,
+            )
+            order = sorted(range(len(body.texts)), key=lambda i: -scores[i])
+            duration = (time.perf_counter() - started) * 1000
+            await asyncio.to_thread(
+                store.record_request,
+                {
+                    "request_id": request_id,
+                    "timestamp": timestamp,
+                    "input_count": len(body.texts),
+                    "token_count": token_total,
+                    "duration_ms": duration,
+                    "status": "ok",
+                },
+            )
+            await asyncio.to_thread(
+                store.event,
+                "INFO",
+                "rerank_succeeded",
+                request_id,
+                f"query_pairs={len(body.texts)} tokens={token_total} duration_ms={duration:.2f}",
+            )
+            results = [
+                {
+                    "index": i,
+                    "score": float(scores[i]),
+                    **({"text": body.texts[i]} if body.return_text else {}),
+                }
+                for i in order
+            ]
+            return {"model": reranker.model_id, "results": results}
+        except asyncio.TimeoutError as exc:
+            await asyncio.to_thread(
+                store.event,
+                "ERROR",
+                "rerank_timeout",
+                request_id,
+                f"timeout after {settings.infer_timeout_s}s",
+            )
+            raise HTTPException(
+                503,
+                f"rerank timed out after {settings.infer_timeout_s}s; retry later",
+                headers={"Retry-After": "5"},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(400, describe_exception(exc)) from exc
+        except Exception as exc:
+            detail = describe_exception(exc)
+            await asyncio.to_thread(store.event, "ERROR", "rerank_failed", request_id, detail)
+            raise HTTPException(500, "rerank inference failed") from exc
 
     @app.get("/api/status")
     async def status():

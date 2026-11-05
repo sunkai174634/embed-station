@@ -22,6 +22,7 @@ class Engine(Protocol):
     model_id: str
     dimension: int
     device_name: str
+    infer_lock: threading.Lock
 
     def embed(self, texts: list[str]) -> EmbeddingResult: ...
 

@@ -3,16 +3,21 @@ from pathlib import Path
 
 import numpy as np
 from fastapi.testclient import TestClient
+from inference_station.api import create_app
 
-from embed_station.api import create_app
-from embed_station.inference import EmbeddingResult
-from embed_station.telemetry import Telemetry
+from inference_station.inference import EmbeddingResult
+from inference_station.telemetry import Telemetry
 
 
 class FakeEngine:
     model_id = "test-model"
     dimension = 3
     device_name = "Fake GPU"
+
+    def __init__(self):
+        import threading
+
+        self.infer_lock = threading.Lock()
 
     def embed(self, texts):
         vectors = []
@@ -80,7 +85,7 @@ def test_configured_workers_run_batches_concurrently():
     import threading
     import time
 
-    from embed_station.batch import BatchProcessor
+    from inference_station.batch import BatchProcessor
 
     class ConcurrentEngine(FakeEngine):
         def __init__(self):
@@ -115,7 +120,7 @@ def test_configured_workers_run_batches_concurrently():
 
 
 def test_batch_cancellation_does_not_affect_other_waiter(tmp_path):
-    from embed_station.batch import BatchProcessor
+    from inference_station.batch import BatchProcessor
 
     processor = BatchProcessor(FakeEngine(), 2, 20)
 

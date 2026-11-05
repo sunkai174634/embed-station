@@ -24,7 +24,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging(level: str) -> logging.Logger:
-    logger = logging.getLogger("embed_station")
+    logger = logging.getLogger("inference_station")
     logger.setLevel(level.upper())
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())

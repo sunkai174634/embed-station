@@ -1,4 +1,4 @@
-# Embed Station — 最终实施计划
+# Inference Station — 最终实施计划
 
 ## 目标与边界
 
