@@ -17,7 +17,7 @@ from .batch import BatchProcessor
 from .inference import Engine, OpenVINOEngine
 from .onnx_engine import OnnxOpenVINOEngine
 from .rerank_engine import OnnxRerankerEngine
-from .settings import resolve_limits, settings
+from .settings import load_model_limits, resolve_limits, settings
 from .telemetry import Telemetry, configure_logging
 
 
@@ -62,10 +62,13 @@ class RerankRequest(BaseModel):
     def validate_texts(cls, value: list[str]) -> list[str]:
         if not value or any(not isinstance(t, str) or not t.strip() for t in value):
             raise ValueError("texts must be a non-empty list of non-empty strings")
-        if len(value) > settings.max_batch_items:
-            raise ValueError(
-                f"{len(value)} texts exceed the per-request limit of {settings.max_batch_items}"
-            )
+        # Rerank candidate pools are sized by the reranker's own declaration
+        # (Hindsight sends batches of TEI_BATCH_SIZE, default 128), not by the
+        # embedding per-request item limit.
+        limits = load_model_limits(Path(settings.reranker_model_dir or settings.model_dir))
+        limit = limits.get("max_batch_texts", settings.max_batch_items)
+        if len(value) > limit:
+            raise ValueError(f"{len(value)} texts exceed the per-request limit of {limit}")
         return value
 
 
@@ -183,6 +186,17 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
         return {
             "object": "list",
             "data": [{"id": active.model_id, "object": "model", "owned_by": "embed-station"}],
+        }
+
+    @app.get("/v1/info")
+    async def v1_info():
+        """TEI-compatible handshake: TEI clients (e.g. Hindsight) GET this on init."""
+        if not state["ready"]:
+            raise HTTPException(503, "model is not ready")
+        reranker = state.get("reranker")
+        return {
+            "model_id": reranker.model_id if reranker else state["engine"].model_id,
+            "device": state["engine"].device_name,
         }
 
     @app.post("/v1/embeddings")
