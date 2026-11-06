@@ -6,6 +6,10 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     environment:
+      # Platform mode: declare the fleet as MODELS=id:dir:format:role[:on|off],...
+      # Leave unset to use the legacy single-model envs below.
+      MODELS: ${MODELS:-}
+      DEFAULT_EMBEDDING_MODEL: ${DEFAULT_EMBEDDING_MODEL:-}
       MODEL_DIR: /models
       MODEL_ID: ${MODEL_ID:-qwen3-embedding-0.6b-int8-ov}
       MODEL_FORMAT: ${MODEL_FORMAT:-openvino}

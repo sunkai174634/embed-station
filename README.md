@@ -30,6 +30,22 @@ latency, status). Input text and embedding vectors are never stored.
 - Same-origin dashboard (`/`) with request history and service events
 - SQLite (WAL) telemetry with optional retention
 
+## Multi-model platform
+
+The station serves a *fleet* of models, not one. Declare them with a single env:
+
+```bash
+MODELS="hs-embed-1:/models/hs-embed-1:onnx:embedding:on,\
+qwen3:/models/qwen3:openvino:embedding:off,\
+hs-rerank-1:/models/hs-rerank-1:rerank:rerank:on"
+```
+
+- `/v1/embeddings` routes by the request's `model` field (omitted → `DEFAULT_EMBEDDING_MODEL`).
+- Unknown model → 404; declared-but-disabled → 503 naming the toggle URL.
+- `POST /api/models/{id}/toggle?enable=true|false` flips a model at runtime.
+- The dashboard shows a per-model card with a toggle button.
+- Unset `MODELS` falls back to the legacy single-model envs.
+
 ## Quick start
 
 Requires Linux/amd64 with an Intel GPU (OpenVINO GPU runtime + drivers), or a

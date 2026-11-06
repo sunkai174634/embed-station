@@ -28,6 +28,21 @@ from .rerank_engine import OnnxRerankerEngine
 from .settings import load_model_limits, settings
 
 
+def _resolve_limits(model_dir: Path, role: str) -> dict:
+    """Effective limits for one model: explicit env override wins, else the
+    model's own station_limits.json declaration, else the built-in default.
+    Env detection uses presence of the variable, so pinning a value for a
+    model without a declaration still works."""
+    declared = load_model_limits(model_dir)
+    resolved = dict(declared)
+    if role == "rerank":
+        if os.getenv("RERANK_MAX_TOKENS"):
+            resolved["max_total_tokens"] = int(os.getenv("RERANK_MAX_TOKENS", "0"))
+    elif os.getenv("MAX_INPUT_TOKENS"):
+        resolved["max_input_tokens"] = int(os.getenv("MAX_INPUT_TOKENS", "0"))
+    return resolved
+
+
 @dataclass
 class ModelSpec:
     model_id: str
@@ -66,7 +81,7 @@ def _parse_entry(entry: str) -> ModelSpec | None:
         format=fmt,
         role=role,
         default_on=default_on,
-        limits=load_model_limits(Path(directory)),
+        limits=_resolve_limits(Path(directory), role),
     )
 
 
@@ -97,7 +112,7 @@ def load_specs() -> list[ModelSpec]:
             format=settings.model_format,
             role="embedding",
             default_on=True,
-            limits=load_model_limits(settings.model_dir),
+            limits=_resolve_limits(settings.model_dir, "embedding"),
         )
     )
     if settings.reranker_model_dir:
@@ -108,7 +123,7 @@ def load_specs() -> list[ModelSpec]:
                 format="rerank",
                 role="rerank",
                 default_on=True,
-                limits=load_model_limits(Path(settings.reranker_model_dir)),
+                limits=_resolve_limits(Path(settings.reranker_model_dir), "rerank"),
             )
         )
     return specs

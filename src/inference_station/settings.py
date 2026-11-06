@@ -65,22 +65,3 @@ class Settings:
 
 
 settings = Settings()
-
-
-def resolve_limits() -> tuple[int, int]:
-    """Effective (embedding_max_tokens, rerank_max_tokens).
-
-    Precedence: env override if explicitly set (not the default), else the
-    model's own station_limits.json, else the built-in default. Env detection
-    uses presence of the variable, so `MAX_INPUT_TOKENS=3584` still wins when
-    the operator wants to pin a value for a model without a declaration.
-    """
-    emb_limits = load_model_limits(settings.model_dir)
-    rr_dir = Path(settings.reranker_model_dir) if settings.reranker_model_dir else None
-    rr_limits = load_model_limits(rr_dir) if rr_dir else {}
-
-    emb_default = emb_limits.get("max_input_tokens", settings.max_input_tokens)
-    rr_default = rr_limits.get("max_total_tokens", settings.rerank_max_tokens)
-    emb = int(os.getenv("MAX_INPUT_TOKENS", emb_default))
-    rr = int(os.getenv("RERANK_MAX_TOKENS", rr_default))
-    return emb, rr

@@ -204,3 +204,40 @@ def test_registry_parsing_and_toggle():
             pass
     finally:
         os.environ.pop("MODELS", None)
+
+
+def test_env_override_chain_and_batch_attach(tmp_path):
+    import os
+
+    os.environ["MODELS"] = "emb-a:/tmp/mA:onnx:embedding:on"
+    os.environ["MAX_INPUT_TOKENS"] = "500"
+    try:
+        from inference_station import registry as reg_mod
+
+        specs = reg_mod.load_specs()
+        assert specs[0].limits["max_input_tokens"] == 500  # env wins over default
+    finally:
+        os.environ.pop("MODELS", None)
+        os.environ.pop("MAX_INPUT_TOKENS", None)
+
+    # batch attach: enabled embedding slot gets a BatchProcessor via the app
+    from inference_station.registry import ModelSpec, Registry
+    from inference_station.telemetry import Telemetry
+
+    spec = ModelSpec(
+        model_id="test-model",
+        model_dir=Path("/tmp/fake"),
+        format="onnx",
+        role="embedding",
+        default_on=True,
+        limits={"max_input_tokens": 3584, "max_total_tokens": 100000, "max_batch_texts": 100},
+    )
+    reg = Registry([spec])
+    reg.slots["test-model"].engine = FakeEngine()
+    reg.slots["test-model"].enabled = True
+    with TestClient(create_app(reg, Telemetry(tmp_path / "d.sqlite3"))) as client:
+        assert reg.slots["test-model"].batch is not None  # attached on startup
+        response = client.post("/v1/embeddings", json={"input": "batched"})
+        assert response.status_code == 200
+    # after shutdown the processor is detached
+    assert reg.slots["test-model"].batch is None

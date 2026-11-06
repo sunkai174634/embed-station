@@ -71,6 +71,27 @@ def describe_exception(exc: BaseException) -> str:
 
 def create_app(registry: Registry | None = None, telemetry: Telemetry | None = None) -> FastAPI:
     logger = configure_logging(settings.log_level)
+
+    async def attach_batch(slot) -> None:
+        """Embedding slots get a BatchProcessor (BATCH_SIZE / BATCH_WINDOW_MS
+        stay per-platform effective); rerankers never do. Runs on the loop."""
+        if slot.spec.role != "embedding" or slot.engine is None or slot.batch is not None:
+            return
+        processor = BatchProcessor(
+            slot.engine,
+            settings.batch_size,
+            settings.batch_window_ms,
+            workers=settings.jobs,
+        )
+        processor.start()
+        slot.batch = processor
+
+    async def detach_batch(slot) -> None:
+        processor = slot.batch
+        slot.batch = None
+        if processor is not None:
+            await processor.close()
+
     state = {
         "registry": registry,
         "telemetry": telemetry,
@@ -92,6 +113,9 @@ def create_app(registry: Registry | None = None, telemetry: Telemetry | None = N
             reg = await asyncio.to_thread(Registry, load_specs())
             await asyncio.to_thread(reg.start_default)
         state["registry"] = reg
+        for slot in reg.slots.values():
+            if slot.enabled:
+                await attach_batch(slot)
         device = None
         for slot in reg.slots.values():
             if slot.engine is not None:
@@ -113,6 +137,8 @@ def create_app(registry: Registry | None = None, telemetry: Telemetry | None = N
         store.event("INFO", "service_ready", detail=f"models={len(reg.slots)} device={device}")
         yield
         state["ready"] = False
+        for slot in reg.slots.values():
+            await detach_batch(slot)
         await asyncio.to_thread(reg.close)
 
     app = FastAPI(title="Inference Station", version="0.2.0", lifespan=lifespan)
@@ -180,6 +206,10 @@ def create_app(registry: Registry | None = None, telemetry: Telemetry | None = N
             known = sorted(reg.slots) if reg else []
             raise HTTPException(404, f"unknown model: {model_id}; known: {known}")
         slot = await asyncio.to_thread(reg.toggle, model_id, enable)
+        if enable:
+            await attach_batch(slot)
+        else:
+            await detach_batch(slot)
         state["telemetry"].event(
             "INFO",
             "model_enabled" if enable else "model_disabled",
