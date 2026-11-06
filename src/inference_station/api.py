@@ -385,7 +385,10 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
                 }
                 for i in order
             ]
-            return {"model": reranker.model_id, "results": results}
+            # TEI-compatible: the top level IS the array. Wrapping it in an
+            # object breaks TEI clients (e.g. Hindsight) that iterate it
+            # expecting dicts of {index, score}.
+            return results
         except asyncio.TimeoutError as exc:
             await asyncio.to_thread(
                 store.event,
