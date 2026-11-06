@@ -132,9 +132,9 @@ def load_specs() -> list[ModelSpec]:
 class Registry:
     """All models on the station, with runtime enable/disable.
 
-    All engines share one GPU lock: the N150 has a single iGPU, so inference
-    is serialized platform-wide; the lock is owned by the first engine built
-    and handed to the rest.
+    All engines serialize GPU inference through one shared lock (see _build):
+    the N150 has a single iGPU, so cross-model GPU work queues instead of
+    contending. Requests to a disabled model fail fast with 503.
     """
 
     def __init__(self, specs: list[ModelSpec]) -> None:
@@ -149,13 +149,22 @@ class Registry:
                     break
 
     def _build(self, spec: ModelSpec) -> Engine | OnnxRerankerEngine:
+        """Build an engine and bind it to the platform-wide GPU lock.
+
+        The N150 has ONE iGPU: every engine (embeddings and rerankers alike)
+        serializes its GPU work through Registry.gpu_lock, so a long batch on
+        one model queues — rather than contends — against every other model.
+        """
         ov_cache = os.getenv("OV_CACHE_DIR")
         cache_dir = Path(ov_cache) if ov_cache else None
         if spec.role == "rerank":
             return OnnxRerankerEngine(spec.model_dir, spec.model_id, self.gpu_lock, cache_dir)
         if spec.format == "onnx":
-            return OnnxOpenVINOEngine(spec.model_dir, spec.model_id, cache_dir)
-        return OpenVINOEngine(spec.model_dir, spec.model_id, cache_dir)
+            engine = OnnxOpenVINOEngine(spec.model_dir, spec.model_id, cache_dir)
+        else:
+            engine = OpenVINOEngine(spec.model_dir, spec.model_id, cache_dir)
+        engine.infer_lock = self.gpu_lock
+        return engine
 
     def start_default(self) -> list[str]:
         """Build and enable every model whose default_on is true."""
@@ -177,7 +186,7 @@ class Registry:
 
     def _first(self, role: str) -> ModelSlot | None:
         for slot in self.slots.values():
-            if slot.spec.role == role:
+            if slot.spec.role == role and slot.enabled:
                 return slot
         return None
 

@@ -272,14 +272,25 @@ def create_app(registry: Registry | None = None, telemetry: Telemetry | None = N
         started = time.perf_counter()
         timestamp = datetime.now(timezone.utc).isoformat()
         try:
-            if processor is not None:
-                result = await asyncio.wait_for(
-                    processor.embed(texts), timeout=settings.infer_timeout_s
-                )
-            else:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(engine.embed, texts), timeout=settings.infer_timeout_s
-                )
+            try:
+                if processor is not None:
+                    result = await asyncio.wait_for(
+                        processor.embed(texts), timeout=settings.infer_timeout_s
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(engine.embed, texts), timeout=settings.infer_timeout_s
+                    )
+            except asyncio.CancelledError:
+                # A toggle disabled this model while the request was queued;
+                # surface it as a retryable condition instead of a bare 500.
+                if not state["ready"]:
+                    raise
+                raise HTTPException(
+                    503,
+                    "model was disabled while this request was queued; retry",
+                    headers={"Retry-After": "2"},
+                ) from None
             duration = (time.perf_counter() - started) * 1000
             await asyncio.to_thread(
                 store.record_request,

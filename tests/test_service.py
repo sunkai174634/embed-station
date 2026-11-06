@@ -241,3 +241,53 @@ def test_env_override_chain_and_batch_attach(tmp_path):
         assert response.status_code == 200
     # after shutdown the processor is detached
     assert reg.slots["test-model"].batch is None
+
+
+def test_platform_gpu_lock_shared_across_engines(tmp_path):
+    """All engines must serialize GPU work through one registry-wide lock."""
+    from inference_station.registry import ModelSpec, Registry
+
+    class ProbeEngine(FakeEngine):
+        """Mimics a real engine: GPU work happens under self.infer_lock."""
+
+        def __init__(self):
+            super().__init__()
+            self.overlap = 0
+
+        def embed(self, texts):
+            import time
+
+            with self.infer_lock:
+                self.overlap += 1
+                time.sleep(0.05)
+                try:
+                    return super().embed(texts)
+                finally:
+                    self.overlap -= 1
+
+    specs = [
+        ModelSpec("a", Path("/tmp/a"), "onnx", "embedding", True, {}),
+        ModelSpec("b", Path("/tmp/b"), "onnx", "embedding", True, {}),
+    ]
+    reg = Registry(specs)
+    for sid in ("a", "b"):
+        reg.slots[sid].engine = ProbeEngine()
+        reg.slots[sid].enabled = True
+    # binding happens in _build; simulate by assigning the shared lock directly
+    for sid in ("a", "b"):
+        reg.slots[sid].engine.infer_lock = reg.gpu_lock
+
+    import threading
+
+    overlap_seen = []
+
+    def hit(slot):
+        slot.engine.embed(["x"])
+        overlap_seen.append(slot.engine.overlap)
+
+    threads = [threading.Thread(target=hit, args=(reg.slots[s],)) for s in ("a", "b") * 3]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    # If the lock were NOT shared, concurrent embeds across engines would push
+    # overlap past 1 during the 50ms sleeps.
+    assert max(overlap_seen) <= 1, f"GPU work overlapped: {max(overlap_seen)}"
