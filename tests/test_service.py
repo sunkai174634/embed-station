@@ -3,8 +3,8 @@ from pathlib import Path
 
 import numpy as np
 from fastapi.testclient import TestClient
-from inference_station.api import create_app
 
+from inference_station.api import create_app
 from inference_station.inference import EmbeddingResult
 from inference_station.telemetry import Telemetry
 
@@ -35,7 +35,21 @@ class FakeEngine:
 
 
 def client(tmp_path: Path):
-    app = create_app(FakeEngine(), Telemetry(tmp_path / "data.sqlite3"))
+    from inference_station.registry import ModelSpec, Registry
+
+    spec = ModelSpec(
+        model_id="test-model",
+        model_dir=Path("/tmp/fake"),
+        format="onnx",
+        role="embedding",
+        default_on=True,
+        limits={"max_input_tokens": 3584, "max_total_tokens": 100000, "max_batch_texts": 100},
+    )
+    reg = Registry([spec])
+    slot = reg.slots["test-model"]
+    slot.engine = FakeEngine()
+    slot.enabled = True
+    app = create_app(reg, Telemetry(tmp_path / "data.sqlite3"))
     return TestClient(app)
 
 
@@ -68,8 +82,13 @@ def test_openai_api_and_persistence(tmp_path):
 def test_validation_model_mismatch_and_pagination(tmp_path):
     with client(tmp_path) as test:
         assert test.post("/v1/embeddings", json={"input": []}).status_code == 422
+        # Platform semantics: unknown model names are 404 (routing), not 400.
         assert (
-            test.post("/v1/embeddings", json={"input": "ok", "model": "other"}).status_code == 400
+            test.post("/v1/embeddings", json={"input": "ok", "model": "other"}).status_code == 404
+        )
+        assert (
+            test.post("/v1/embeddings", json={"input": "ok", "model": "test-model"}).status_code
+            == 200
         )
         oversized = " ".join(["word"] * 4000)
         limited = test.post("/v1/embeddings", json={"input": oversized})
@@ -77,7 +96,7 @@ def test_validation_model_mismatch_and_pagination(tmp_path):
         assert "exceeds the limit" in limited.json()["detail"]
         for _ in range(3):
             assert test.post("/v1/embeddings", json={"input": "ok"}).status_code == 200
-        assert test.get("/api/requests?limit=2&offset=1").json()["total"] == 3
+        assert test.get("/api/requests?limit=2&offset=1").json()["total"] == 4
         assert test.get("/api/events?limit=1000").status_code == 422
 
 
@@ -152,3 +171,36 @@ def test_html_errors_are_never_in_database(tmp_path):
     )
     page = store.page("requests", 10, 0)
     assert page["data"][0]["error"].startswith("<script>")
+
+
+def test_registry_parsing_and_toggle():
+    import os
+
+    os.environ["MODELS"] = (
+        "emb-a:/tmp/mA:onnx:embedding:on,"
+        "emb-b:/tmp/mB:openvino:embedding:off,"
+        "rr-1:/tmp/mR:rerank:rerank:on"
+    )
+    try:
+        from inference_station import registry as mod
+
+        specs = mod.load_specs()
+        assert [s.model_id for s in specs] == ["emb-a", "emb-b", "rr-1"]
+        assert specs[0].default_on is True and specs[1].default_on is False
+        assert specs[2].role == "rerank" and specs[2].format == "rerank"
+        # duplicate ids rejected
+        os.environ["MODELS"] = "x:/a:onnx:embedding,x:/b:onnx:embedding"
+        try:
+            mod.load_specs()
+            raise AssertionError("duplicate ids must raise")
+        except ValueError:
+            pass
+        # no embedding rejected
+        os.environ["MODELS"] = "x:/a:rerank:rerank"
+        try:
+            mod.load_specs()
+            raise AssertionError("embedding-less MODELS must raise")
+        except ValueError:
+            pass
+    finally:
+        os.environ.pop("MODELS", None)

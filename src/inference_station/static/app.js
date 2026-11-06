@@ -3,8 +3,8 @@ const el=id=>document.getElementById(id);
 const cell=(row,value,cls)=>{const td=document.createElement('td');if(cls)td.className=cls;td.textContent=value??'';row.append(td);return td};
 const badge=(text,tone)=>{const span=document.createElement('span');span.className=`badge badge-${tone}`;span.textContent=text;return span};
 const I18N={
-  en:{state:'State',model:'Model',requests:'Requests',success:'Success',latAvg:'Latency avg',latP95:'Latency p95',started:'Started',ready:'Ready',notReady:'Not ready',ok:'ok',allTime:'all time',last100:'last 100',prev:'← Prev',next:'Next →',of:'of',pause:'Pause',resume:'Resume',updated:'updated',dim:'dim',connecting:'Connecting',unavailable:'Unavailable'},
-  zh:{state:'状态',model:'模型',requests:'请求数',success:'成功率',latAvg:'平均延迟',latP95:'P95 延迟',started:'启动时间',ready:'就绪',notReady:'未就绪',ok:'成功',allTime:'全程',last100:'最近 100 次',prev:'← 上一页',next:'下一页 →',of:'共',pause:'暂停',resume:'恢复',updated:'更新于',dim:'维度',connecting:'连接中',unavailable:'不可用'}
+  en:{state:'State',model:'Model',modelsCard:'Models',modelsHint:'Toggle models on or off',on:'ON',off:'OFF',role:'Role',enabled:'Enabled',disabled:'Disabled',turnOn:'Enable',turnOff:'Disable',toggleWait:'Working…',defaultTag:'default',dim:'dim',requests:'Requests',success:'Success',latAvg:'Latency avg',latP95:'Latency p95',started:'Started',ready:'Ready',notReady:'Not ready',ok:'ok',allTime:'all time',last100:'last 100',prev:'← Prev',next:'Next →',of:'of',pause:'Pause',resume:'Resume',updated:'updated',dim:'dim',connecting:'Connecting',unavailable:'Unavailable'},
+  zh:{state:'状态',model:'模型',modelsCard:'模型',modelsHint:'打开或关闭模型',on:'开',off:'关',role:'角色',enabled:'已启用',disabled:'已停用',turnOn:'启用',turnOff:'停用',toggleWait:'处理中…',defaultTag:'默认',dim:'维度',requests:'请求数',success:'成功率',latAvg:'平均延迟',latP95:'P95 延迟',started:'启动时间',ready:'就绪',notReady:'未就绪',ok:'成功',allTime:'全程',last100:'最近 100 次',prev:'← 上一页',next:'下一页 →',of:'共',pause:'暂停',resume:'恢复',updated:'更新于',dim:'维度',connecting:'连接中',unavailable:'不可用'}
 };
 let lang=localStorage.getItem('lang')||(navigator.language&&navigator.language.startsWith('zh')?'zh':'en');
 const t=key=>I18N[lang][key]||I18N.en[key];
@@ -24,7 +24,7 @@ function renderStats(status){
   const box=el('stats');box.replaceChildren();
   const items=[
     {label:t('state'),value:status.ready?t('ready'):t('notReady'),sub:status.device,tone:status.ready?'ok':'err'},
-    {label:t('model'),value:status.model,sub:`${t('dim')} ${status.dimension??'—'}`},
+    {label:t('model'),value:(status.models||[]).filter(m=>m.enabled).map(m=>m.id).join(', ')||'—',sub:(status.models||[]).length+' total'},
     {label:t('requests'),value:status.requests??'—',sub:`${status.successes??0} ${t('ok')}`},
     {label:t('success'),value:status.success_rate==null?'—':`${(status.success_rate*100).toFixed(1)}%`,tone:status.success_rate!=null&&status.success_rate<1?'warn':'ok'},
     {label:t('latAvg'),value:fmtMs(status.average_ms),sub:t('allTime')},
@@ -41,6 +41,30 @@ function renderStats(status){
     box.append(card);
   }
 }
+function renderModels(status){
+  const box=el('models');if(!box)return;box.replaceChildren();
+  for(const m of (status.models||[])){
+    const card=document.createElement('div');card.className='model'+(m.enabled?' model-on':' model-off');
+    const head=document.createElement('div');head.className='model-head';
+    const name=document.createElement('span');name.className='model-name';name.textContent=m.id;
+    head.append(name);
+    if(m.default){const tag=document.createElement('span');tag.className='badge badge-muted';tag.textContent=t('defaultTag');head.append(tag)}
+    const state=badge(m.enabled?t('on'):t('off'),m.enabled?'ok':'err');head.append(state);
+    card.append(head);
+    const meta=document.createElement('div');meta.className='model-meta';
+    meta.textContent=`${m.role} · ${m.format}`+(m.dimension!=null?` · ${t('dim')} ${m.dimension}`:'');
+    card.append(meta);
+    const btn=document.createElement('button');
+    btn.textContent=m.enabled?t('turnOff'):t('turnOn');
+    btn.onclick=async()=>{
+      btn.disabled=true;btn.textContent=t('toggleWait');
+      try{await fetch(`/api/models/${encodeURIComponent(m.id)}/toggle?enable=${!m.enabled}`,{method:'POST'})}catch(e){}
+      refresh();
+    };
+    card.append(btn);
+    box.append(card);
+  }
+}
 async function refresh(){
   if(paused)return;
   try{
@@ -54,6 +78,7 @@ async function refresh(){
     state.className=`badge ${status.ready?'badge-ok':'badge-err'}`;
     el('updated').textContent=`${t('updated')} ${new Date().toLocaleTimeString()}`;
     renderStats(status);
+    renderModels(status);
     const requestBody=el('requests');requestBody.replaceChildren();
     for(const item of requests.data){
       const row=document.createElement('tr');

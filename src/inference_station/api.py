@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -14,31 +13,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from .batch import BatchProcessor
-from .inference import Engine, OpenVINOEngine
-from .onnx_engine import OnnxOpenVINOEngine
-from .rerank_engine import OnnxRerankerEngine
-from .settings import load_model_limits, resolve_limits, settings
+from .inference import Engine
+from .registry import ModelSlot, Registry, load_specs
+from .settings import settings
 from .telemetry import Telemetry, configure_logging
-
-
-def build_engine() -> Engine:
-    """Select the engine by MODEL_FORMAT: 'onnx' serves any ONNX encoder,
-    'openvino' (default) serves an OpenVINO IR export directory."""
-    cache_dir = Path(os.getenv("OV_CACHE_DIR", "/cache/gpu")) if os.getenv("OV_CACHE_DIR") else None
-    if settings.model_format == "onnx":
-        return OnnxOpenVINOEngine(settings.model_dir, settings.model_id, cache_dir)
-    return OpenVINOEngine(settings.model_dir, settings.model_id, cache_dir)
-
-
-def build_reranker(gpu_lock) -> OnnxRerankerEngine | None:
-    """Optional second model: an ONNX cross-encoder sharing the process GPU lock.
-    Disabled unless RERANKER_MODEL_DIR points at a model.onnx directory."""
-    if not settings.reranker_model_dir:
-        return None
-    cache_dir = Path(os.getenv("OV_CACHE_DIR", "/cache/gpu")) if os.getenv("OV_CACHE_DIR") else None
-    return OnnxRerankerEngine(
-        Path(settings.reranker_model_dir), settings.reranker_model_id, gpu_lock, cache_dir
-    )
 
 
 class RerankRequest(BaseModel):
@@ -62,13 +40,6 @@ class RerankRequest(BaseModel):
     def validate_texts(cls, value: list[str]) -> list[str]:
         if not value or any(not isinstance(t, str) or not t.strip() for t in value):
             raise ValueError("texts must be a non-empty list of non-empty strings")
-        # Rerank candidate pools are sized by the reranker's own declaration
-        # (Hindsight sends batches of TEI_BATCH_SIZE, default 128), not by the
-        # embedding per-request item limit.
-        limits = load_model_limits(Path(settings.reranker_model_dir or settings.model_dir))
-        limit = limits.get("max_batch_texts", settings.max_batch_items)
-        if len(value) > limit:
-            raise ValueError(f"{len(value)} texts exceed the per-request limit of {limit}")
         return value
 
 
@@ -98,16 +69,14 @@ def describe_exception(exc: BaseException) -> str:
     return f"{name}: {kept}"
 
 
-def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None) -> FastAPI:
+def create_app(registry: Registry | None = None, telemetry: Telemetry | None = None) -> FastAPI:
     logger = configure_logging(settings.log_level)
     state = {
-        "engine": engine,
-        "batch": None,
+        "registry": registry,
         "telemetry": telemetry,
         "started": None,
         "ready": False,
         "device": None,
-        "dimension": None,
     }
 
     @asynccontextmanager
@@ -118,41 +87,35 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
             retention_days=settings.telemetry_retention_days,
         )
         state["telemetry"] = store
-        emb_limit, rr_limit = resolve_limits()
-        state["emb_limit"] = emb_limit
-        state["rr_limit"] = rr_limit
-        active = engine
-        if active is None:
-            active = await asyncio.to_thread(build_engine)
-        state["engine"] = active
-        state["dimension"] = active.dimension
-        state["device"] = active.device_name
+        reg = registry
+        if reg is None:
+            reg = await asyncio.to_thread(Registry, load_specs())
+            await asyncio.to_thread(reg.start_default)
+        state["registry"] = reg
+        device = None
+        for slot in reg.slots.values():
+            if slot.engine is not None:
+                device = getattr(slot.engine, "device_name", None)
+                break
+        state["device"] = device
         state["started"] = datetime.now(timezone.utc).isoformat()
         state["ready"] = True
-        state["batch"] = BatchProcessor(
-            active,
-            settings.batch_size,
-            settings.batch_window_ms,
-            workers=settings.jobs,
-        )
-        state["batch"].start()
-        reranker = await asyncio.to_thread(build_reranker, active.infer_lock)
-        state["reranker"] = reranker
-        if reranker is not None:
-            store.event(
-                "INFO",
-                "reranker_ready",
-                detail=f"model={reranker.model_id} device={reranker.device_name}",
-            )
-        store.event("INFO", "service_ready", detail=f"device={active.device_name}")
+        for slot in reg.slots.values():
+            if slot.enabled:
+                store.event(
+                    "INFO",
+                    "model_ready",
+                    detail=(
+                        f"model={slot.spec.model_id} role={slot.spec.role}"
+                        f" device={getattr(slot.engine, 'device_name', '?')}"
+                    ),
+                )
+        store.event("INFO", "service_ready", detail=f"models={len(reg.slots)} device={device}")
         yield
         state["ready"] = False
-        await state["batch"].close()
-        if state.get("reranker") is not None:
-            await asyncio.to_thread(state["reranker"].close)
-        await asyncio.to_thread(active.close)
+        await asyncio.to_thread(reg.close)
 
-    app = FastAPI(title="Embed Station", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Inference Station", version="0.2.0", lifespan=lifespan)
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
@@ -162,60 +125,104 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
 
     @app.get("/health")
     async def health():
-        active = state["engine"]
+        reg: Registry | None = state["registry"]
+        models = reg.describe() if reg else []
         return {
             "status": "ok",
             "ready": state["ready"],
-            "model": active.model_id if active else settings.model_id,
             "device": state["device"],
-            "dimension": state["dimension"],
-            "reranker": state["reranker"].model_id if state.get("reranker") is not None else None,
+            "models": [m["id"] for m in models if m["enabled"]],
+            "all_models": models,
         }
 
     @app.get("/ready")
     async def ready():
-        if not state["ready"]:
-            raise HTTPException(503, "GPU model is not ready")
+        reg: Registry | None = state["registry"]
+        if not state["ready"] or (reg and not any(s.enabled for s in reg.slots.values())):
+            raise HTTPException(503, "no enabled model is ready")
         return {"status": "ready", "device": state["device"]}
 
     @app.get("/v1/models")
     async def models():
+        reg: Registry | None = state["registry"]
         if not state["ready"]:
             raise HTTPException(503, "model is not ready")
-        active = state["engine"]
         return {
             "object": "list",
-            "data": [{"id": active.model_id, "object": "model", "owned_by": "embed-station"}],
+            "data": [
+                {"id": m["id"], "object": "model", "owned_by": "inference-station"}
+                for m in (reg.describe() if reg else [])
+                if m["enabled"]
+            ],
         }
 
     @app.get("/v1/info")
     async def v1_info():
         """TEI-compatible handshake: TEI clients (e.g. Hindsight) GET this on init."""
-        if not state["ready"]:
+        reg: Registry | None = state["registry"]
+        if not state["ready"] or reg is None:
             raise HTTPException(503, "model is not ready")
-        reranker = state.get("reranker")
-        return {
-            "model_id": reranker.model_id if reranker else state["engine"].model_id,
-            "device": state["engine"].device_name,
-        }
+        rr = reg.get(None, "rerank")
+        model_id = rr.engine.model_id if rr and rr.engine else reg.default_embedding
+        return {"model_id": model_id, "device": state["device"]}
+
+    @app.get("/api/models")
+    async def api_models():
+        reg: Registry | None = state["registry"]
+        if reg is None:
+            return {"models": [], "default_embedding": None}
+        return {"models": reg.describe(), "default_embedding": reg.default_embedding}
+
+    @app.post("/api/models/{model_id}/toggle")
+    async def api_toggle(model_id: str, enable: bool = Query(...)):
+        reg: Registry | None = state["registry"]
+        if reg is None or model_id not in reg.slots:
+            known = sorted(reg.slots) if reg else []
+            raise HTTPException(404, f"unknown model: {model_id}; known: {known}")
+        slot = await asyncio.to_thread(reg.toggle, model_id, enable)
+        state["telemetry"].event(
+            "INFO",
+            "model_enabled" if enable else "model_disabled",
+            detail=f"model={model_id}",
+        )
+        return {"id": model_id, "enabled": slot.enabled}
+
+    def _resolve_embedding(body: EmbeddingRequest) -> tuple[ModelSlot, Engine]:
+        """Route to the requested embedding model; error if unknown/disabled."""
+        reg: Registry | None = state["registry"]
+        if reg is None:
+            raise HTTPException(503, "service is not ready")
+        if body.model and body.model not in reg.slots:
+            raise HTTPException(
+                404,
+                f"unknown model: {body.model}; available: {sorted(reg.slots)}",
+            )
+        slot = reg.get(body.model, "embedding")
+        if slot is None or slot.spec.role != "embedding":
+            raise HTTPException(404, "no embedding model is registered")
+        if not slot.enabled or slot.engine is None:
+            raise HTTPException(
+                503,
+                f"model {slot.spec.model_id} is disabled; enable it via"
+                f" POST /api/models/{slot.spec.model_id}/toggle?enable=true",
+            )
+        return slot, slot.engine
 
     @app.post("/v1/embeddings")
     async def embeddings(body: EmbeddingRequest, request: Request, response: Response):
-        active = state["engine"]
         store: Telemetry = state["telemetry"]
         request_id = request.headers.get("x-request-id") or str(uuid4())
         response.headers["x-request-id"] = request_id
         if not state["ready"]:
             raise HTTPException(503, "model is not ready")
-        if body.model and body.model != active.model_id:
-            raise HTTPException(400, "requested model does not match configured model")
+        slot, engine = _resolve_embedding(body)
         texts = [body.input] if isinstance(body.input, str) else body.input
         if len(texts) > settings.max_batch_items:
             raise HTTPException(
                 413,
                 f"{len(texts)} inputs exceed the per-request limit of {settings.max_batch_items}",
             )
-        processor: BatchProcessor = state["batch"]
+        processor: BatchProcessor | None = slot.batch
         if processor is not None and processor.backlog + len(texts) > settings.max_queue_items:
             # Overload guard: reject before enqueueing so ghost/timed-out work
             # cannot pile up behind a wedged GPU and starve new requests.
@@ -224,20 +231,25 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
                 f"service is busy ({processor.backlog} queued items); retry later",
                 headers={"Retry-After": "5"},
             )
-        token_total = await asyncio.to_thread(state["engine"].count_tokens, texts)
-        if token_total > state.get("emb_limit", settings.max_input_tokens):
+        limit = slot.spec.limits.get("max_input_tokens", settings.max_input_tokens)
+        token_total = await asyncio.to_thread(engine.count_tokens, texts)
+        if token_total > limit:
             raise HTTPException(
                 413,
-                f"input of {token_total} tokens exceeds the limit"
-                f" of {state.get('emb_limit', settings.max_input_tokens)};"
+                f"input of {token_total} tokens exceeds the limit of {limit};"
                 " split the input into smaller batches",
             )
         started = time.perf_counter()
         timestamp = datetime.now(timezone.utc).isoformat()
         try:
-            result = await asyncio.wait_for(
-                state["batch"].embed(texts), timeout=settings.infer_timeout_s
-            )
+            if processor is not None:
+                result = await asyncio.wait_for(
+                    processor.embed(texts), timeout=settings.infer_timeout_s
+                )
+            else:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(engine.embed, texts), timeout=settings.infer_timeout_s
+                )
             duration = (time.perf_counter() - started) * 1000
             await asyncio.to_thread(
                 store.record_request,
@@ -255,21 +267,22 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
                 "INFO",
                 "embedding_succeeded",
                 request_id,
-                f"inputs={len(texts)} tokens={result.token_count} duration_ms={duration:.2f}",
+                f"model={slot.spec.model_id} inputs={len(texts)}"
+                f" tokens={result.token_count} duration_ms={duration:.2f}",
             )
             logger.info(
                 "embedding_succeeded",
                 extra={
                     "request_id": request_id,
                     "detail": (
-                        f"inputs={len(texts)} tokens={result.token_count} "
-                        f"duration_ms={duration:.2f}"
+                        f"model={slot.spec.model_id} inputs={len(texts)}"
+                        f" tokens={result.token_count} duration_ms={duration:.2f}"
                     ),
                 },
             )
             return {
                 "object": "list",
-                "model": active.model_id,
+                "model": slot.spec.model_id,
                 "data": [
                     {"object": "embedding", "index": i, "embedding": vector}
                     for i, vector in enumerate(result.vectors)
@@ -332,21 +345,39 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
     @app.post("/v1/rerank")
     async def rerank(body: RerankRequest, request: Request, response: Response):
         """TEI-compatible reranking: score (query, text) pairs, return sorted results."""
-        reranker = state.get("reranker")
+        reg: Registry | None = state["registry"]
         request_id = request.headers.get("x-request-id") or str(uuid4())
         response.headers["x-request-id"] = request_id
-        if not state["ready"]:
+        if not state["ready"] or reg is None:
             raise HTTPException(503, "model is not ready")
-        if reranker is None:
-            raise HTTPException(404, "no reranker configured; set RERANKER_MODEL_DIR")
-        if body.model and body.model != reranker.model_id:
-            raise HTTPException(400, "requested model does not match configured reranker")
-        token_total = await asyncio.to_thread(reranker.count_tokens, body.query, body.texts)
-        if token_total > state.get("rr_limit", settings.rerank_max_tokens):
+        if body.model and body.model not in reg.slots:
+            raise HTTPException(
+                404,
+                f"unknown model: {body.model}; available: {sorted(reg.slots)}",
+            )
+        slot = reg.get(body.model, "rerank")
+        if slot is None or slot.spec.role != "rerank":
+            raise HTTPException(404, "no reranker is registered")
+        if not slot.enabled or slot.engine is None:
+            raise HTTPException(
+                503,
+                f"reranker {slot.spec.model_id} is disabled; enable it via"
+                f" POST /api/models/{slot.spec.model_id}/toggle?enable=true",
+            )
+        reranker = slot.engine
+        assert reranker is not None  # noqa: S101 — guarded by enabled check above
+        batch_limit = slot.spec.limits.get("max_batch_texts", settings.max_batch_items)
+        if len(body.texts) > batch_limit:
             raise HTTPException(
                 413,
-                f"input of {token_total} tokens exceeds the rerank limit"
-                f" of {state.get('rr_limit', settings.rerank_max_tokens)};"
+                f"{len(body.texts)} texts exceed the per-request limit of {batch_limit}",
+            )
+        rr_limit = slot.spec.limits.get("max_total_tokens", settings.rerank_max_tokens)
+        token_total = await asyncio.to_thread(reranker.count_tokens, body.query, body.texts)
+        if token_total > rr_limit:
+            raise HTTPException(
+                413,
+                f"input of {token_total} tokens exceeds the rerank limit of {rr_limit};"
                 " split the input into smaller batches",
             )
         started = time.perf_counter()
@@ -411,13 +442,17 @@ def create_app(engine: Engine | None = None, telemetry: Telemetry | None = None)
 
     @app.get("/api/status")
     async def status():
-        active = state["engine"]
+        reg: Registry | None = state["registry"]
         summary = await asyncio.to_thread(state["telemetry"].summary) if state["telemetry"] else {}
+        default_slot = reg.get(None, "embedding") if reg else None
         return {
             "ready": state["ready"],
             "device": state["device"],
-            "model": active.model_id if active else settings.model_id,
-            "dimension": state["dimension"],
+            "models": reg.describe() if reg else [],
+            "default_embedding": reg.default_embedding if reg else None,
+            "default_dimension": getattr(default_slot.engine, "dimension", None)
+            if default_slot and default_slot.engine
+            else None,
             "started_at": state["started"],
             **summary,
         }

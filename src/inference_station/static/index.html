@@ -2,11 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Embed Station</title><link rel="stylesheet" href="/static/style.css">
+<title>Inference Station</title><link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header>
-  <div class="brand"><span class="brand-mark" aria-hidden="true"></span><h1>Embed Station</h1></div>
+  <div class="brand"><span class="brand-mark" aria-hidden="true"></span><h1>Inference Station</h1></div>
   <span id="state" class="badge">Connecting</span>
   <span id="updated" class="muted"></span>
   <select id="lang" aria-label="Language"><option value="en">English</option><option value="zh">中文</option></select>
@@ -14,6 +14,10 @@
 </header>
 <main>
   <section class="stats" id="stats" aria-label="Service metrics"></section>
+  <section class="card">
+    <div class="card-header"><h2 data-i18n="modelsCard">Models</h2><span class="muted" data-i18n="modelsHint">Toggle models on or off</span></div>
+    <div class="models" id="models"></div>
+  </section>
   <section class="card">
     <div class="card-header"><h2 data-i18n="requests">Requests</h2>
       <form id="request-filter" class="filter"><input name="request_id" data-i18n-ph="filterRequestId" placeholder="Filter by Request ID" aria-label="Request ID"><button data-i18n="apply">Apply</button></form>
